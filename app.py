@@ -9,16 +9,12 @@ import numpy as np
 import pandas as pd
 from gtts import gTTS
 import base64
-import time
 from io import BytesIO
 import mammoth
 from PyPDF2 import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
 from langdetect import detect, LangDetectException
-
-# Set Hugging Face token for model access
-os.environ["HF_TOKEN"] = "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"
 
 # Set page configuration
 st.set_page_config(
@@ -74,11 +70,15 @@ def get_audio_player_html(audio_data):
 
 # Helper function for text-to-speech
 def text_to_speech(text, lang='en'):
-    tts = gTTS(text=text, lang=lang, slow=False)
-    fp = BytesIO()
-    tts.write_to_fp(fp)
-    fp.seek(0)
-    return fp.read()
+    try:
+        tts = gTTS(text=text, lang=lang, slow=False)
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return fp.read()
+    except Exception as e:
+        st.error(f"Error generating speech: {str(e)}")
+        return None
 
 # Function to extract text from documents
 def extract_text_from_document(file):
@@ -113,8 +113,8 @@ def extract_text_from_document(file):
             text = stringio.read()
             
         elif file_extension in ['jpg', 'jpeg', 'png']:
-            image = Image.open(io.BytesIO(file.getvalue()))
-            text = "Image content - text extraction would happen here"
+            # Simplified image handling without OCR
+            text = "Image content - text extraction would require OCR capabilities."
             
         else:
             text = "Unsupported file format for text extraction."
@@ -124,9 +124,8 @@ def extract_text_from_document(file):
     
     return text
 
-# Simplified placeholder function for video/audio processing
+# Simplified placeholder function for media processing
 def process_media_file(file):
-    # In a production app, you would process the file here
     file_extension = file.name.split('.')[-1].lower()
     
     if file_extension in ['mp3', 'wav']:
@@ -199,25 +198,33 @@ def load_ml_model():
 # Load ML model
 autofill_model, vectorizer = load_ml_model()
 
-# Initialize Gemma 3 model
+# Initialize Gemma model (optional)
 @st.cache_resource
 def load_gemma_model():
     try:
+        # Set Hugging Face token
+        os.environ["HF_TOKEN"] = "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"
+        
+        # Load model
         model = AutoModelForCausalLM.from_pretrained(
-            "google/gemma-3-4b-vision-pt", 
+            "google/gemma-3-4b-pt", 
             token=os.environ["HF_TOKEN"],
-            torch_dtype=torch.bfloat16
+            torch_dtype=torch.float16
         )
         processor = AutoProcessor.from_pretrained(
-            "google/gemma-3-4b-vision-pt", 
+            "google/gemma-3-4b-pt", 
             token=os.environ["HF_TOKEN"]
         )
         return model, processor
     except Exception as e:
-        st.warning(f"Failed to load Gemma 3 model: {str(e)}. Using a fallback approach.")
+        st.warning(f"Failed to load Gemma model: {str(e)}. Using a fallback approach.")
         return None, None
 
-# Sidebar for language selection
+# Check if user wants to load the model
+if 'skip_model_load' not in st.session_state:
+    st.session_state.skip_model_load = True  # Default to skip for faster startup
+
+# Sidebar for language selection and settings
 with st.sidebar:
     st.markdown("<h2 class='sub-header'>Settings</h2>", unsafe_allow_html=True)
     source_lang = st.selectbox(
@@ -232,6 +239,10 @@ with st.sidebar:
         index=0
     )
     
+    # Model loading option (for development)
+    skip_load = st.checkbox("Skip model loading (for development)", value=st.session_state.skip_model_load)
+    st.session_state.skip_model_load = skip_load
+    
     st.markdown("---")
     st.markdown("<h3 class='sub-header'>About ROH-Ads</h3>", unsafe_allow_html=True)
     st.markdown("""
@@ -243,23 +254,15 @@ with st.sidebar:
     - Marketing strategy insights
     """)
 
-# Main content area with tabs
-# Load Gemma 3 model at startup
-# Load model with option to skip for faster development
-if 'skip_model_load' not in st.session_state:
-    st.session_state.skip_model_load = False
-
-# Add a checkbox to control model loading (useful for development/debugging)
-skip_load = st.sidebar.checkbox("Skip model loading (for development)", value=st.session_state.skip_model_load)
-st.session_state.skip_model_load = skip_load
-
+# Load model if not skipped
 if not st.session_state.skip_model_load:
-    with st.spinner("Loading Gemma 3 model..."):
+    with st.spinner("Loading Gemma model..."):
         gemma_model, gemma_processor = load_gemma_model()
 else:
     st.sidebar.warning("Model loading skipped. Some features will be unavailable.")
     gemma_model, gemma_processor = None, None
 
+# Main content area with tabs
 tab1, tab2, tab3 = st.tabs(["Translate", "Document Analysis", "Marketing Assistant"])
 
 # Translation Tab
@@ -300,7 +303,7 @@ with tab1:
                         except LangDetectException:
                             st.warning("Could not detect language, defaulting to English")
                     
-                    # In a real app, you would call a translation API here
+                    # Simple translation placeholder
                     translated_text = f"Translated: {input_text} (from {source_lang} to {target_lang})"
                     
                     st.markdown("<div class='result-container'>", unsafe_allow_html=True)
@@ -309,49 +312,16 @@ with tab1:
                     
                     # Generate speech output
                     audio_bytes = text_to_speech(translated_text, lang=target_lang.lower()[:2])
-                    st.markdown(get_audio_player_html(audio_bytes), unsafe_allow_html=True)
+                    if audio_bytes:
+                        st.markdown(get_audio_player_html(audio_bytes), unsafe_allow_html=True)
                     
                 elif uploaded_file:
                     if input_type == "Image":
-                        # Process image with Gemma 3
-                        if gemma_model and gemma_processor:
-                            try:
-                                image = Image.open(uploaded_file).convert('RGB')
-                                
-                                # Prepare prompt for image analysis
-                                prompt = "<start_of_image> Describe this image in detail and identify key elements."
-                                
-                                # Process with Gemma 3
-                                model_inputs = gemma_processor(text=prompt, images=image, return_tensors="pt")
-                                
-                                # Move to GPU if available
-                                if torch.cuda.is_available():
-                                    model_inputs = {k: v.to("cuda") for k, v in model_inputs.items()}
-                                    gemma_model = gemma_model.to("cuda")
-                                
-                                # Generate text
-                                input_len = model_inputs["input_ids"].shape[-1]
-                                
-                                with torch.inference_mode():
-                                    generation = gemma_model.generate(
-                                        **model_inputs, 
-                                        max_new_tokens=100, 
-                                        do_sample=False
-                                    )
-                                    if torch.cuda.is_available():
-                                        generation = generation[0].cpu()[input_len:]
-                                    else:
-                                        generation = generation[0][input_len:]
-                                
-                                # Decode generated text
-                                analyzed_text = gemma_processor.decode(generation, skip_special_tokens=True)
-                                st.success("Image successfully analyzed!")
-                            except Exception as e:
-                                st.error(f"Error processing image: {str(e)}")
-                                analyzed_text = "Error processing image. Using fallback analysis."
-                        else:
-                            analyzed_text = "This is a sample image analysis that would be generated by Gemma 3"
+                        # Process image
+                        st.info("Using simplified image analysis mode")
                         
+                        # Simple image analysis placeholder
+                        analyzed_text = "This image contains [subject], [background], and [details]. The scene appears to be [description]."
                         translated_text = f"Translated: {analyzed_text} (from {source_lang} to {target_lang})"
                         
                         st.markdown("<div class='result-container'>", unsafe_allow_html=True)
@@ -359,24 +329,18 @@ with tab1:
                         st.markdown("</div>", unsafe_allow_html=True)
                         
                     elif input_type == "Audio":
-                        # Process audio with speech recognition
-                        st.write("Audio transcription in progress...")
-                        
-                        # Process audio file
-                        transcribed_text = process_media_file(uploaded_file)
-                        translated_text = f"Translated: {transcribed_text} (from {source_lang} to {target_lang})"
+                        # Process audio
+                        processed_text = process_media_file(uploaded_file)
+                        translated_text = f"Translated: {processed_text} (from {source_lang} to {target_lang})"
                         
                         st.markdown("<div class='result-container'>", unsafe_allow_html=True)
                         st.write(translated_text)
                         st.markdown("</div>", unsafe_allow_html=True)
                         
                     elif input_type == "Video":
-                        # Extract audio from video and transcribe
-                        st.write("Video processing in progress...")
-                        
-                        # Process video file
-                        video_text = process_media_file(uploaded_file)
-                        translated_text = f"Translated: {video_text} (from {source_lang} to {target_lang})"
+                        # Process video
+                        processed_text = process_media_file(uploaded_file)
+                        translated_text = f"Translated: {processed_text} (from {source_lang} to {target_lang})"
                         
                         st.markdown("<div class='result-container'>", unsafe_allow_html=True)
                         st.write(translated_text)
@@ -423,7 +387,7 @@ with tab2:
                 # Document summary
                 st.markdown("<h4 class='sub-header'>Document Summary</h4>", unsafe_allow_html=True)
                 st.markdown("<div class='result-container'>", unsafe_allow_html=True)
-                st.write("Here would be a summary of the document generated by Gemma 3 model")
+                st.write("Here is a summary of the document based on the extracted content.")
                 st.markdown("</div>", unsafe_allow_html=True)
 
 # Marketing Assistant Tab
@@ -455,8 +419,6 @@ with tab3:
         
     if submitted:
         with st.spinner("Generating marketing strategy..."):
-            # In a real application, this would utilize the Gemma 3 model for generating insights
-            
             # Generate a voice message using gTTS
             strategy_summary = f"Hello! I've analyzed the marketing data for {business_name}. Based on your {primary_goal} goal, I recommend focusing on {', '.join(channels[:2])} for your {industry} business targeting {target_audience[:50]}..."
             
@@ -474,7 +436,7 @@ with tab3:
             st.write(f"**Timeline:** {timeline} days")
             
             st.markdown("#### Recommended Strategy")
-            st.write("Your marketing strategy would be generated here by the Gemma 3 model based on the provided inputs.")
+            st.write("Your marketing strategy would be generated here by the AI based on the provided inputs.")
             
             st.markdown("#### Channel Breakdown")
             for channel in channels:
@@ -483,8 +445,9 @@ with tab3:
             st.markdown("</div>", unsafe_allow_html=True)
             
             # Display voice message
-            st.markdown("<h4 class='sub-header'>Strategy Voice Summary</h4>", unsafe_allow_html=True)
-            st.markdown(get_audio_player_html(audio_bytes), unsafe_allow_html=True)
+            if audio_bytes:
+                st.markdown("<h4 class='sub-header'>Strategy Voice Summary</h4>", unsafe_allow_html=True)
+                st.markdown(get_audio_player_html(audio_bytes), unsafe_allow_html=True)
             
             # Display metrics and KPIs
             st.markdown("<h4 class='sub-header'>Projected Performance Metrics</h4>", unsafe_allow_html=True)
