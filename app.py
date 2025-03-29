@@ -1,6 +1,6 @@
 import streamlit as st
 import torch
-from transformers import pipeline, AutoProcessor, Gemma3ForConditionalGeneration
+from transformers import pipeline, AutoProcessor, AutoModelForCausalLM
 from PIL import Image
 import io
 import os
@@ -21,6 +21,9 @@ import whisper
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import RandomForestClassifier
 from langdetect import detect, LangDetectException
+
+# Set Hugging Face token for model access
+os.environ["HF_TOKEN"] = "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"
 
 # Set page configuration
 st.set_page_config(
@@ -216,11 +219,18 @@ autofill_model, vectorizer = load_ml_model()
 @st.cache_resource
 def load_gemma_model():
     try:
-        model = Gemma3ForConditionalGeneration.from_pretrained("google/gemma-3-4b-pt")
-        processor = AutoProcessor.from_pretrained("google/gemma-3-4b-pt")
+        model = AutoModelForCausalLM.from_pretrained(
+            "google/gemma-3-4b-vision-pt", 
+            token=os.environ["HF_TOKEN"],
+            torch_dtype=torch.bfloat16
+        )
+        processor = AutoProcessor.from_pretrained(
+            "google/gemma-3-4b-vision-pt", 
+            token=os.environ["HF_TOKEN"]
+        )
         return model, processor
-    except:
-        st.warning("Failed to load Gemma 3 model. Using a fallback approach.")
+    except Exception as e:
+        st.warning(f"Failed to load Gemma 3 model: {str(e)}. Using a fallback approach.")
         return None, None
 
 # Sidebar for language selection
@@ -250,6 +260,22 @@ with st.sidebar:
     """)
 
 # Main content area with tabs
+# Load Gemma 3 model at startup
+# Load model with option to skip for faster development
+if 'skip_model_load' not in st.session_state:
+    st.session_state.skip_model_load = False
+
+# Add a checkbox to control model loading (useful for development/debugging)
+skip_load = st.sidebar.checkbox("Skip model loading (for development)", value=st.session_state.skip_model_load)
+st.session_state.skip_model_load = skip_load
+
+if not st.session_state.skip_model_load:
+    with st.spinner("Loading Gemma 3 model..."):
+        gemma_model, gemma_processor = load_gemma_model()
+else:
+    st.sidebar.warning("Model loading skipped. Some features will be unavailable.")
+    gemma_model, gemma_processor = None, None
+
 tab1, tab2, tab3 = st.tabs(["Translate", "Document Analysis", "Marketing Assistant"])
 
 # Translation Tab
@@ -304,10 +330,44 @@ with tab1:
                 elif uploaded_file:
                     if input_type == "Image":
                         # Process image with Gemma 3
-                        st.write("Image analysis would be processed by Gemma 3 model")
+                        if gemma_model and gemma_processor:
+                            try:
+                                image = Image.open(uploaded_file).convert('RGB')
+                                
+                                # Prepare prompt for image analysis
+                                prompt = "<start_of_image> Describe this image in detail and identify key elements."
+                                
+                                # Process with Gemma 3
+                                model_inputs = gemma_processor(text=prompt, images=image, return_tensors="pt")
+                                
+                                # Move to GPU if available
+                                if torch.cuda.is_available():
+                                    model_inputs = {k: v.to("cuda") for k, v in model_inputs.items()}
+                                    gemma_model = gemma_model.to("cuda")
+                                
+                                # Generate text
+                                input_len = model_inputs["input_ids"].shape[-1]
+                                
+                                with torch.inference_mode():
+                                    generation = gemma_model.generate(
+                                        **model_inputs, 
+                                        max_new_tokens=100, 
+                                        do_sample=False
+                                    )
+                                    if torch.cuda.is_available():
+                                        generation = generation[0].cpu()[input_len:]
+                                    else:
+                                        generation = generation[0][input_len:]
+                                
+                                # Decode generated text
+                                analyzed_text = gemma_processor.decode(generation, skip_special_tokens=True)
+                                st.success("Image successfully analyzed!")
+                            except Exception as e:
+                                st.error(f"Error processing image: {str(e)}")
+                                analyzed_text = "Error processing image. Using fallback analysis."
+                        else:
+                            analyzed_text = "This is a sample image analysis that would be generated by Gemma 3"
                         
-                        # Placeholder for image analysis
-                        analyzed_text = "This is a sample image analysis that would be generated by Gemma 3"
                         translated_text = f"Translated: {analyzed_text} (from {source_lang} to {target_lang})"
                         
                         st.markdown("<div class='result-container'>", unsafe_allow_html=True)
